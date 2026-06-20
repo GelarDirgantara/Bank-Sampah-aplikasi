@@ -1,0 +1,70 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-slate-105: #f1f5f9;
+  --color-zinc-105: #f4f4f5;
+  --color-slate-705: #3a4a61;
+  --color-slate-350: #cbd5e1;
+  --color-slate-450: #94a3b8;
+  --color-slate-550: #64748b;
+  --color-slate-650: #475569;
+  --color-slate-750: #334155;
+  --color-slate-850: #1e293b;
+  --color-gray-550: #4b5563;
+  --color-rose-550: #e11d48;
+  --color-rose-850: #9f1239;
+  --color-emerald-750: #15803d; /* Set to clear identifiable green (emerald-700/800 range) */
+  --color-emerald-850: #14532d;
+  --color-blue-105: #eff6ff;
+}
+
+@media print {
+  /* Hide sidebar, buttons, date selection tools and non-printable elements */
+  aside,
+  header,
+  nav,
+  button,
+  .print\:hidden {
+    display: none !important;
+  }
+
+  /* Expand main workspace to use full page width and clear excess padding */
+  body, 
+  main, 
+  #main-workspace {
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  /* Reset tables & cards for pristine layout on paper */
+  .bg-white, .bg-slate-50, .bg-slate-100\/40 {
+    background: #ffffff !important;
+    border-color: #e2e8f0 !important;
+    color: #1e293b !important;
+  }
+
+  /* Highlight titles */
+  tr {
+    page-break-inside: avoid !important;
+  }
+
+  /* Ensure card groups never break mid-way on a page fold */
+  .break-inside-avoid {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  /* Set page margins */
+  @page {
+    size: portrait;
+    margin: 1.5cm 1cm 1.5cm 1cm;
+  }
+}
