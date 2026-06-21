@@ -118,6 +118,7 @@ export default function InputTransaksi({ token }: InputTransaksiProps) {
   const filteredNasabah = searchQuery.trim() === "" || !Array.isArray(nasabahList)
     ? [] 
     : nasabahList.filter(n => {
+        if (n.isActive === false) return false;
         const matchesName = n.nama && n.nama.toLowerCase().includes(searchQuery.toLowerCase());
         const matchesAddress = n.alamat && n.alamat.toLowerCase().includes(searchQuery.toLowerCase());
         return !!(matchesName || matchesAddress);

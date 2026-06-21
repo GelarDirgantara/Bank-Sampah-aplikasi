@@ -99,6 +99,7 @@ export default function PenarikanSaldo({ token, isAdmin }: PenarikanSaldoProps) 
   const filteredNasabah = searchQuery.trim() === "" || !Array.isArray(nasabahList)
     ? []
     : nasabahList.filter(n => {
+        if (n.isActive === false) return false;
         const nameMatch = n.nama && n.nama.toLowerCase().includes(searchQuery.toLowerCase());
         const addressMatch = n.alamat && n.alamat.toLowerCase().includes(searchQuery.toLowerCase());
         return !!(nameMatch || addressMatch);

@@ -6,18 +6,16 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
+import { initializeApp, getApps } from "firebase-admin/app";
+import { getFirestore } from "firebase-admin/firestore";
 import { Staff, StaffRole, Nasabah, Transaction, PriceListItem, NotificationLog, Withdrawal, CollectionSchedule } from "./src/types.js";
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json());
 
@@ -98,7 +96,7 @@ const DEFAULT_PRICE_LIST: PriceListItem[] = [
   { id: "minyak-jelantah", namaSampah: "Minyak Jelantah", harga: 5500, satuan: "kg", updatedAt: "2026-10-01T08:00:00Z", updatedBy: "admin" }
 ];
 
-const DEFAULT_STAFF: (Staff & { passwordHash: string })[] = [
+const DEFAULT_STAFF: Staff[] = [
   { id: "staff-1", username: "admin", nama: "Iwan Budianto (Ketua RT)", role: StaffRole.ADMIN, createdAt: "2026-05-01T07:00:00Z", passwordHash: "admin" },
   { id: "staff-2", username: "petugas", nama: "Agus Santoso (Petugas Timbang)", role: StaffRole.PETUGAS, createdAt: "2026-05-02T08:30:00Z", passwordHash: "petugas" }
 ];
@@ -133,12 +131,15 @@ const DEFAULT_TRANSACTIONS: Transaction[] = [];
 
 const DEFAULT_NOTIFICATIONS: NotificationLog[] = [];
 
-// Helper to load db
-function readDB(): LocalDB {
+let firestoreDb: any = null;
+let cachedDB: LocalDB | null = null;
+const COLLECTION_NAME = "app_state_grup23";
+
+function loadLocalFallback(): LocalDB {
   let db: LocalDB;
   if (!fs.existsSync(DB_FILE)) {
     db = {
-      staff: DEFAULT_STAFF.map(({ passwordHash, ...rest }) => rest), // Keep staff for API representation
+      staff: DEFAULT_STAFF, // Keep staff with passwordHash for API and DB local storage
       nasabah: DEFAULT_NASABAH,
       transactions: DEFAULT_TRANSACTIONS,
       priceList: DEFAULT_PRICE_LIST,
@@ -154,16 +155,30 @@ function readDB(): LocalDB {
     fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf-8");
     return db;
   }
-  const data = fs.readFileSync(DB_FILE, "utf-8");
-  db = JSON.parse(data);
-
-  // Auto-initialize withdrawals if not present
-  if (!db.withdrawals) {
-    db.withdrawals = [];
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf-8");
+  
+  try {
+    const data = fs.readFileSync(DB_FILE, "utf-8");
+    db = JSON.parse(data);
+  } catch (err) {
+    console.error("Failed to parse db.json, rebuilding default structures:", err);
+    db = {
+      staff: DEFAULT_STAFF,
+      nasabah: DEFAULT_NASABAH,
+      transactions: DEFAULT_TRANSACTIONS,
+      priceList: DEFAULT_PRICE_LIST,
+      notificationsLog: DEFAULT_NOTIFICATIONS,
+      withdrawals: [],
+      schedule: {
+        tanggal: "2026-07-04",
+        waktu: "08:00 - 11:30 WIB",
+        keterangan: "Sesuai dengan perjanjian dengan Bank Sampah Pusat, pengumpulan sampah rutin dilakukan setiap 2 minggu sekali.",
+        updatedAt: new Date().toISOString()
+      }
+    };
   }
 
-  // Auto-initialize schedule if not present
+  // Ensure arrays/objects exist and run automatic schema migration checks
+  if (!db.withdrawals) db.withdrawals = [];
   if (!db.schedule) {
     db.schedule = {
       tanggal: "2026-07-04",
@@ -171,31 +186,10 @@ function readDB(): LocalDB {
       keterangan: "Sesuai dengan perjanjian dengan Bank Sampah Pusat, pengumpulan sampah rutin dilakukan setiap 2 minggu sekali.",
       updatedAt: new Date().toISOString()
     };
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf-8");
   }
-
-  // Auto-migrate to the new 48-item price list if it has the older small set
   if (!db.priceList || db.priceList.length < 20) {
     db.priceList = DEFAULT_PRICE_LIST;
-    if (db.transactions) {
-      db.transactions = db.transactions.map(tx => ({
-        ...tx,
-        items: tx.items.map(item => {
-          let nid = item.jenisSampah;
-          if (nid === "plastik") nid = "plastik-botol-b";
-          if (nid === "kardus") nid = "kertas-duplek-karton";
-          if (nid === "kertas") nid = "kertas-putih-hvs";
-          if (nid === "oli") nid = "minyak-jelantah";
-          if (nid === "aluminium") nid = "logam-alumunium-panci";
-          if (nid === "besi") nid = "logam-besi-kosong-tipis";
-          return { ...item, jenisSampah: nid };
-        })
-      }));
-    }
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf-8");
   }
-
-  // Auto-migrate and update to the new 23-nasabah list
   const firstNasabahIsIra = db.nasabah && db.nasabah[0] && db.nasabah[0].nama === "Ira";
   if (!db.nasabah || db.nasabah.length < 15 || !firstNasabahIsIra) {
     db.nasabah = DEFAULT_NASABAH;
@@ -208,18 +202,129 @@ function readDB(): LocalDB {
       keterangan: "Sesuai dengan perjanjian dengan Bank Sampah Pusat, pengumpulan sampah rutin dilakukan setiap 2 minggu sekali.",
       updatedAt: new Date().toISOString()
     };
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf-8");
   }
   return db;
 }
 
-// Helper to save db
-function writeDB(data: LocalDB) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf-8");
+// Upload local DB data directly up to Firestore
+async function uploadToFirestore(data: LocalDB) {
+  if (!firestoreDb) return;
+  try {
+    const batch = firestoreDb.batch();
+    const docs = {
+      staff: { list: data.staff },
+      nasabah: { list: data.nasabah },
+      transactions: { list: data.transactions },
+      priceList: { list: data.priceList },
+      notificationsLog: { list: data.notificationsLog },
+      withdrawals: { list: data.withdrawals },
+      schedule: data.schedule || {
+        tanggal: "2026-07-04",
+        waktu: "08:00 - 11:30 WIB",
+        keterangan: "Sesuai dengan perjanjian dengan Bank Sampah Pusat, pengumpulan sampah rutin dilakukan setiap 2 minggu sekali.",
+        updatedAt: new Date().toISOString()
+      }
+    };
+
+    Object.entries(docs).forEach(([key, value]) => {
+      const docRef = firestoreDb.collection(COLLECTION_NAME).doc(key);
+      batch.set(docRef, value, { merge: true });
+    });
+
+    await batch.commit();
+    console.log("Firestore cloud database updated successfully.");
+  } catch (err) {
+    console.error("Firestore batch commit failure:", err);
+  }
 }
 
-// Ensure database is initialized at start
-readDB();
+// Initial synchronizer to safely bootstrap the app state
+async function initializeFirebaseAndLoadState(): Promise<LocalDB> {
+  const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+  if (fs.existsSync(configPath)) {
+    try {
+      const fbConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      // Safe, single-instance initialization
+      if (getApps().length === 0) {
+        initializeApp({
+          projectId: fbConfig.projectId,
+        });
+      }
+      firestoreDb = getFirestore();
+      
+      if (fbConfig.firestoreDatabaseId) {
+        firestoreDb.settings({
+          databaseId: fbConfig.firestoreDatabaseId,
+        });
+      }
+      console.log("Firebase/Firestore initialized with Cloud Database ID:", fbConfig.firestoreDatabaseId || "default");
+
+      // Verify and download the latest data snapshot
+      console.log("Fetching state from remote Firestore...");
+      const snapshot = await firestoreDb.collection(COLLECTION_NAME).get();
+      if (!snapshot.empty) {
+        const remoteData: any = {};
+        snapshot.forEach((doc: any) => {
+          remoteData[doc.id] = doc.data();
+        });
+
+        if (remoteData.staff && remoteData.nasabah) {
+          const loadedDB: LocalDB = {
+            staff: remoteData.staff.list || [],
+            nasabah: remoteData.nasabah.list || [],
+            transactions: remoteData.transactions?.list || [],
+            priceList: remoteData.priceList?.list || [],
+            notificationsLog: remoteData.notificationsLog?.list || [],
+            withdrawals: remoteData.withdrawals?.list || [],
+            schedule: remoteData.schedule || {
+              tanggal: "2026-07-04",
+              waktu: "08:00 - 11:30 WIB",
+              keterangan: "Sesuai dengan perjanjian dengan Bank Sampah Pusat, pengumpulan sampah rutin dilakukan setiap 2 minggu sekali.",
+              updatedAt: new Date().toISOString()
+            }
+          };
+
+          cachedDB = loadedDB;
+          fs.writeFileSync(DB_FILE, JSON.stringify(loadedDB, null, 2), "utf-8");
+          console.log("SUCCESS: Application state downloaded and active from Firestore.");
+          return loadedDB;
+        }
+      }
+
+      console.log("No data found in Firestore collection. Provisioning initial dataset to cloud...");
+      const localData = loadLocalFallback();
+      await uploadToFirestore(localData);
+      cachedDB = localData;
+      return localData;
+    } catch (err) {
+      console.error("WARNING: Firebase init/sync failed. Running offline with local db.json. Error:", err);
+    }
+  } else {
+    console.log("No firebase-applet-config.json found. Running offline with local file storage.");
+  }
+
+  const fbFallback = loadLocalFallback();
+  cachedDB = fbFallback;
+  return fbFallback;
+}
+
+// Reader function
+function readDB(): LocalDB {
+  if (cachedDB) return cachedDB;
+  cachedDB = loadLocalFallback();
+  return cachedDB;
+}
+
+// Writer function
+function writeDB(data: LocalDB) {
+  cachedDB = data;
+  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf-8");
+  if (firestoreDb) {
+    uploadToFirestore(data).catch(err => {
+      console.error("Asynchronous Cloud update failed:", err);
+    });
+  }
+}
 
 // -------------------------------------------------------------
 // API Endpoints
@@ -232,8 +337,9 @@ app.post("/api/auth/login", (req, res) => {
     return res.status(400).json({ message: "Username dan password harus diisi." });
   }
 
-  // Look up in DEFAULT_STAFF (pre-encrypted or plaintext match for convenience of demonstration)
-  const staffMatch = DEFAULT_STAFF.find(
+  // Look up in actual db to allow persistent newly created staff logins
+  const db = readDB();
+  const staffMatch = db.staff.find(
     (s) => s.username === username.toLowerCase() && s.passwordHash === password
   );
 
@@ -270,7 +376,8 @@ function getRoleFromToken(token: string): { id: string; role: StaffRole; nama: s
   if (parts.length < 4) return null;
   // Join back any pieces of staff ID that contain hyphens
   const staffId = parts.slice(2, parts.length - 1).join("-");
-  const staff = DEFAULT_STAFF.find((s) => s.id === staffId);
+  const db = readDB();
+  const staff = db.staff.find((s) => s.id === staffId);
   if (!staff) return null;
   return { id: staff.id, role: staff.role, nama: staff.nama };
 }
@@ -360,12 +467,15 @@ app.delete("/api/nasabah/:id", authenticate, requireAdmin, (req, res) => {
     return res.status(404).json({ message: "Data nasabah tidak ditemukan." });
   }
 
-  // Delete transactions related to this customer or keep them for historical purposes?
-  // Let's filter out customer but keep database consistent
-  db.nasabah.splice(idx, 1);
+  if (db.nasabah[idx].saldo > 0) {
+    return res.status(400).json({ message: "Nasabah tidak dapat dihapus karena masih memiliki saldo Rp" + db.nasabah[idx].saldo });
+  }
+
+  // Set active to false instead of splicaling to prevent orphaned transactions
+  db.nasabah[idx].isActive = false;
   writeDB(db);
 
-  res.json({ message: "Nasabah berhasil dihapus." });
+  res.json({ message: "Nasabah berhasil dinonaktifkan." });
 });
 
 // 2. Price List Routes
@@ -553,6 +663,7 @@ app.delete("/api/transactions/:id", authenticate, requireAdmin, (req, res) => {
   const tx = db.transactions[txIdx];
 
   // Atomic deduction: subtract balance, weight amount, and decrements records from Nasabah
+  let simulatedNotification = null;
   const nasabahIdx = db.nasabah.findIndex((n) => n.id === tx.nasabahId);
   if (nasabahIdx !== -1) {
     const nasabah = db.nasabah[nasabahIdx];
@@ -564,12 +675,32 @@ app.delete("/api/transactions/:id", authenticate, requireAdmin, (req, res) => {
       totalBeratKg: Math.max(0, Number((nasabah.totalBeratKg - totalBerat).toFixed(2))),
       totalTransaksi: Math.max(0, nasabah.totalTransaksi - 1)
     };
+
+    const cleanDateStr = new Date(tx.tanggal).toLocaleDateString("id-ID", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric"
+    });
+    
+    // Create correction notification
+    const msgLines = `Halo ${nasabah.nama}, Transaksi setoran sampah Anda pada ${cleanDateStr} senilai Rp ${tx.total.toLocaleString("id-ID")} telah DIBATALKAN oleh admin. Saldo Anda dikoreksi menjadi: Rp ${db.nasabah[nasabahIdx].saldo.toLocaleString("id-ID")}. Hubungi admin bila ada pertanyaan.`;
+    
+    simulatedNotification = {
+      id: `notif-${Date.now()}`,
+      nasabahId: nasabah.id,
+      nasabahNama: nasabah.nama,
+      nomorHp: nasabah.nomorHp,
+      message: msgLines,
+      status: "simulated" as const,
+      createdAt: new Date().toISOString()
+    };
+    db.notificationsLog.push(simulatedNotification);
   }
 
   db.transactions.splice(txIdx, 1);
   writeDB(db);
 
-  res.json({ message: "Transaksi berhasil dibatalkan dan saldo dideposit balik." });
+  res.json({ message: "Transaksi berhasil dibatalkan dan saldo dideposit balik.", simulatedNotification });
 });
 
 // 3b. Withdrawals Endpoint
@@ -738,16 +869,11 @@ app.post("/api/staff", authenticate, requireAdmin, (req, res) => {
     nama,
     role: role as StaffRole,
     createdBy: (req as any).user.id,
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    passwordHash: password
   };
 
   db.staff.push(newStaff);
-  
-  // also push to custom system password matching system for runtime log-ability
-  DEFAULT_STAFF.push({
-    ...newStaff,
-    passwordHash: password
-  });
 
   writeDB(db);
 
@@ -770,10 +896,6 @@ app.delete("/api/staff/:id", authenticate, requireAdmin, (req, res) => {
 
   db.staff.splice(idx, 1);
   writeDB(db);
-
-  // Sync default staff runtime lookup as well
-  const defIdx = DEFAULT_STAFF.findIndex((s) => s.id === id);
-  if (defIdx !== -1) DEFAULT_STAFF.splice(defIdx, 1);
 
   res.json({ message: "Akun petugas berhasil dihapus." });
 });
@@ -836,6 +958,9 @@ app.get("/api/dashboard/stats", authenticate, (req, res) => {
 // -------------------------------------------------------------
 
 async function startServer() {
+  // Sync the cloud database before routing queries
+  await initializeFirebaseAndLoadState();
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },

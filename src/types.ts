@@ -15,6 +15,7 @@ export interface Staff {
   role: StaffRole;
   createdBy?: string;
   createdAt: string;
+  passwordHash?: string;
 }
 
 export interface Nasabah {
@@ -27,6 +28,7 @@ export interface Nasabah {
   totalTransaksi: number;
   createdBy: string;
   createdAt: string;
+  isActive?: boolean;
 }
 
 export interface TransactionItem {

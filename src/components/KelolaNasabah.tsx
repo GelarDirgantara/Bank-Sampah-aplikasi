@@ -116,6 +116,7 @@ export default function KelolaNasabah({ token }: KelolaNasabahProps) {
 
   // Search logic
   const filteredNasabah = !Array.isArray(nasabahList) ? [] : nasabahList.filter((n) => {
+    if (n.isActive === false) return false;
     const q = searchQuery.toLowerCase();
     return (
       (n.nama && n.nama.toLowerCase().includes(q)) ||
