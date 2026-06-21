@@ -8,7 +8,7 @@ import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
-import { initializeApp, getApps } from "firebase-admin/app";
+import { initializeApp, getApps, cert } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { Staff, StaffRole, Nasabah, Transaction, PriceListItem, NotificationLog, Withdrawal, CollectionSchedule } from "./src/types.js";
 
@@ -241,8 +241,23 @@ async function uploadToFirestore(data: LocalDB) {
 // Initial synchronizer to safely bootstrap the app state
 async function initializeFirebaseAndLoadState(): Promise<LocalDB> {
   const configPath = path.join(process.cwd(), "firebase-applet-config.json");
-  if (fs.existsSync(configPath)) {
-    try {
+  let usingADC = false;
+  
+  try {
+    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+      console.log("Found FIREBASE_SERVICE_ACCOUNT env var. Initializing Firebase Admin...");
+      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+      
+      if (getApps().length === 0) {
+        initializeApp({
+          credential: cert(serviceAccount),
+          projectId: serviceAccount.project_id
+        });
+      }
+      firestoreDb = getFirestore();
+      console.log("Firebase/Firestore initialized with Service Account from env var.");
+    } else if (fs.existsSync(configPath)) {
+      usingADC = true;
       const fbConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
       // Safe, single-instance initialization
       if (getApps().length === 0) {
@@ -258,7 +273,9 @@ async function initializeFirebaseAndLoadState(): Promise<LocalDB> {
         });
       }
       console.log("Firebase/Firestore initialized with Cloud Database ID:", fbConfig.firestoreDatabaseId || "default");
+    }
 
+    if (firestoreDb) {
       // Verify and download the latest data snapshot
       console.log("Fetching state from remote Firestore...");
       const snapshot = await firestoreDb.collection(COLLECTION_NAME).get();
@@ -296,11 +313,15 @@ async function initializeFirebaseAndLoadState(): Promise<LocalDB> {
       await uploadToFirestore(localData);
       cachedDB = localData;
       return localData;
-    } catch (err) {
+    }
+  } catch (err: any) {
+    if (err && err.message && err.message.includes("NO_ADC_FOUND")) {
+      console.error("Failed to connect to Firestore because no credentials were found.");
+      console.error("Please set the FIREBASE_SERVICE_ACCOUNT environment variable on Render with your Service Account JSON.");
+      console.error("Falling back to local in-memory DB.");
+    } else {
       console.error("WARNING: Firebase init/sync failed. Running offline with local db.json. Error:", err);
     }
-  } else {
-    console.log("No firebase-applet-config.json found. Running offline with local file storage.");
   }
 
   const fbFallback = loadLocalFallback();
